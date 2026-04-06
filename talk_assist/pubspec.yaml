@@ -1,0 +1,41 @@
+name: talk_assist
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.10.8
+
+dependencies:
+  flutter:
+    sdk: flutter
+  archive: ^4.0.9
+  audioplayers: ^6.1.0
+  connectivity_plus: ^6.1.3
+  http: ^1.2.2
+  llamadart: ^0.6.4
+  path_provider: ^2.1.5
+  shared_preferences: ^2.3.3
+  record: ^6.2.0
+  sherpa_onnx: ^1.12.25
+  flutter_dotenv: ^5.2.1
+
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+hooks:
+  user_defines:
+    llamadart:
+      llamadart_native_backends:
+        platforms:
+          android-arm64:
+            backends: [cpu]
+            cpu_profile: compact
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env
