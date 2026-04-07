@@ -10,6 +10,7 @@ import 'package:talk_assist/llm/model_repository.dart';
 import 'package:talk_assist/llm/open_router_llm_service.dart';
 import 'package:talk_assist/llm/safe_mode_llm_service.dart';
 import 'package:talk_assist/message.dart';
+import 'package:talk_assist/search/search_injector.dart';
 
 /// Result from [LlmOrchestrator.replyForUserInput].
 ///
@@ -65,17 +66,20 @@ class LlmOrchestrator {
     required LlmService localLlmService,
     required LlmService safeModeLlmService,
     required Future<List<ConnectivityResult>> Function() connectivityCheck,
+    SearchInjector? searchInjector,
   }) : _modelRepository = modelRepository,
        _onlineLlm = onlineLlmService,
        _localLlm = localLlmService,
        _safeModeLlm = safeModeLlmService,
-       _connectivityCheck = connectivityCheck;
+       _connectivityCheck = connectivityCheck,
+        _searchInjector = searchInjector ?? SearchInjector();
 
   final ModelRepository _modelRepository;
   final LlmService _onlineLlm;
   final LlmService _localLlm;
   final LlmService _safeModeLlm;
   final Future<List<ConnectivityResult>> Function() _connectivityCheck;
+  final SearchInjector _searchInjector;
 
   Future<void>? _startFuture;
   Future<bool>? _prepareFuture;
@@ -147,13 +151,18 @@ class LlmOrchestrator {
       debugPrint('LLM request started (inputChars=${normalized.length}).');
     }
 
+    // Use normalizedWithSearch for LLMs so they have web context.
+    // inject search results if the message triggers a keyword match
+    // safemode unchanged, would be a waste of tokens
+    final normalizedWithSearch = await _searchInjector.injectIfNeeded(normalized);
+
     try {
       // ── 1. Try online (OpenRouter) ─────────────────────────────────────────
       final isOnline = await _hasLikelyInternetConnection();
       if (isOnline) {
         try {
           final onlineReply = await _onlineLlm.generateReply(
-            userInput: normalized,
+            userInput: normalizedWithSearch,
             history: _historyForLlm(_latestHistory),
           );
           _latestHistory = <ChatMessage>[
@@ -168,7 +177,7 @@ class LlmOrchestrator {
           if (kDebugMode) debugPrint('OpenRouter reply succeeded.');
           return LlmOrchestratorReply(
             text: onlineReply,
-            origin: AssistantOrigin.localLlm,
+            origin: AssistantOrigin.onlineLlm,
           );
         } catch (e) {
           if (kDebugMode) {
@@ -182,7 +191,7 @@ class LlmOrchestrator {
       if (localReady) {
         try {
           final localReply = await _localLlm.generateReply(
-            userInput: normalized,
+            userInput: normalizedWithSearch,
             history: _historyForLlm(_latestHistory),
           );
           _latestHistory = <ChatMessage>[

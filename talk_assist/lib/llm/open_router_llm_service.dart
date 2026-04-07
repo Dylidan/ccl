@@ -12,7 +12,8 @@ import 'package:talk_assist/message.dart';
 /// the [LlmOrchestrator] will catch [LlmUnavailableException] and route
 /// to the local on-device model or safe-mode instead.
 ///
-///To Run: create a .env file in project root with "OPENROUTER_KEY=yourkey" then
+///To Run: create a .env file in project root with "OPENROUTER_KEY=yourkey"
+/// and "SERPER_KEY=yourkey" then
 ///   flutter run
 ///
 /// As of now I have my API key in the .env file, not sure if that is good
@@ -32,6 +33,7 @@ class OpenRouterLlmService implements LlmService {
   // 'openrouter/auto' lets OpenRouter pick the best free model automatically.
   // I tried using a couple including meta-llama/llama-3.1-8b-instruct:free
   // but they seem to fail occasionally so I'm going to leave it as auto
+  // models are constantly being removed from the free tier
   static const String _model = 'openrouter/auto';
 
   static const Duration _requestTimeout = Duration(seconds: 30);
