@@ -63,7 +63,12 @@ class PiperTtsService implements TtsService {
   bool _initialized = false;
   bool _disposed = false;
   bool _isSpeaking = false;
-  final _initCompleter = Completer<void>();
+
+  // FIX (Bug 1): replaced _initCompleter with an in-progress flag + nullable
+  // future so that a failed init can be retried, and concurrent callers all
+  // await the same in-flight future instead of spawning duplicate work.
+  bool _initInProgress = false;
+  Future<void>? _initFuture;
 
   @override
   bool get isReady => _initialized && _modelRecord != null;
@@ -73,15 +78,21 @@ class PiperTtsService implements TtsService {
     if (_disposed) return false;
     if (_initialized) return true;
 
-    try {
-      await _initCompleter.future.timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw TimeoutException("TTS init check timeout"),
-      );
-      return _initialized;
-    } catch (_) {
-      return false;
+    // If init is in flight, wait for it (with a timeout).
+    final inFlight = _initFuture;
+    if (inFlight != null) {
+      try {
+        await inFlight.timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => throw TimeoutException("TTS init check timeout"),
+        );
+        return _initialized;
+      } catch (_) {
+        return false;
+      }
     }
+
+    return false;
   }
 
   @override
@@ -91,35 +102,41 @@ class PiperTtsService implements TtsService {
     }
 
     if (_initialized) {
-      if (kDebugMode) {
-        debugPrint("TTS: Already initialized, skipping");
-      }
+      if (kDebugMode) debugPrint("TTS: Already initialized, skipping");
       return;
     }
 
-    if (_initCompleter.isCompleted) {
-      if (kDebugMode) {
-        debugPrint("TTS: Initialization already in progress");
-      }
-      return;
+    // FIX (Bug 1): if a prior attempt is in flight, return that same future
+    // so callers coalesce instead of racing.
+    if (_initInProgress) {
+      if (kDebugMode) debugPrint("TTS: Initialization already in progress");
+      return _initFuture!;
     }
 
-    if (kDebugMode) {
-      debugPrint("TTS: Starting initialization...");
-    }
+    // FIX (Bug 1): store the future and set the in-progress flag so that:
+    //   - concurrent callers await the same work
+    //   - a failed attempt clears _initInProgress so the next call can retry
+    _initInProgress = true;
+    _initFuture = _initInternal();
 
     try {
-      // Ensure model is available.
-      if (kDebugMode) {
-        debugPrint("TTS: Checking/downloading voice model...");
-      }
+      await _initFuture!;
+    } finally {
+      _initInProgress = false;
+      _initFuture = null;
+    }
+  }
+
+  Future<void> _initInternal() async {
+    if (kDebugMode) debugPrint("TTS: Starting initialization...");
+
+    try {
+      if (kDebugMode) debugPrint("TTS: Checking/downloading voice model...");
 
       final record = await _modelRepository.ensureModelAvailable();
 
       if (record == null) {
-        if (kDebugMode) {
-          debugPrint("TTS ERROR: Failed to obtain TTS voice model");
-        }
+        if (kDebugMode) debugPrint("TTS ERROR: Failed to obtain TTS voice model");
         throw TtsException("Failed to obtain TTS voice model");
       }
 
@@ -133,17 +150,10 @@ class PiperTtsService implements TtsService {
         debugPrint("TTS:   Espeak dir: ${record.espeakDataDir}");
         debugPrint("TTS: Initialization complete - READY TO SPEAK");
       }
-
-      if (!_initCompleter.isCompleted) {
-        _initCompleter.complete();
-      }
     } catch (e) {
-      if (kDebugMode) {
-        debugPrint("TTS ERROR: Initialization failed - $e");
-      }
-      if (!_initCompleter.isCompleted) {
-        _initCompleter.completeError(e);
-      }
+      if (kDebugMode) debugPrint("TTS ERROR: Initialization failed - $e");
+      // FIX (Bug 1): just rethrow — _initInProgress is cleared in the
+      // finally block of init(), allowing the next call to retry.
       rethrow;
     }
   }
@@ -151,16 +161,12 @@ class PiperTtsService implements TtsService {
   @override
   Future<void> speak(String text) async {
     if (_disposed) {
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Skipped - service disposed");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Skipped - service disposed");
       return;
     }
 
     if (text.trim().isEmpty) {
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Skipped - empty text");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Skipped - empty text");
       return;
     }
 
@@ -171,59 +177,42 @@ class PiperTtsService implements TtsService {
       debugPrint("TTS SPEAK: Current ready state: $_initialized");
     }
 
-    // Wait for initialization.
+    // Trigger or wait for init if not yet ready.
     if (!_initialized) {
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Not ready yet, waiting for initialization...");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Not ready yet, waiting for initialization...");
       try {
-        await _initCompleter.future.timeout(
+        await init().timeout(
           const Duration(seconds: 30),
           onTimeout: () {
             throw TtsException("TTS initialization timed out");
           },
         );
-        if (kDebugMode) {
-          debugPrint("TTS SPEAK: Initialization completed while waiting");
-        }
+        if (kDebugMode) debugPrint("TTS SPEAK: Initialization completed while waiting");
       } catch (e) {
-        if (kDebugMode) {
-          debugPrint("TTS SPEAK: SKIPPED - TTS not ready: $e");
-        }
+        if (kDebugMode) debugPrint("TTS SPEAK: SKIPPED - TTS not ready: $e");
         return;
       }
     }
 
     if (_modelRecord == null) {
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: SKIPPED - no model record available");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: SKIPPED - no model record available");
       return;
     }
 
-    // Stop any current speech.
     if (_isSpeaking) {
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Stopping current speech");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Stopping current speech");
       await stop();
     }
 
     _isSpeaking = true;
-
-    if (kDebugMode) {
-      debugPrint("TTS SPEAK: Starting speech generation...");
-    }
+    if (kDebugMode) debugPrint("TTS SPEAK: Starting speech generation...");
 
     try {
-      // Generate speech on isolate.
       final tempDir = await getTemporaryDirectory();
       final outputPath =
           "${tempDir.path}/tts_output_${DateTime.now().millisecondsSinceEpoch}.wav";
 
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Output path: $outputPath");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Output path: $outputPath");
 
       final request = _SpeechGenerationRequest(
         text: text,
@@ -236,16 +225,12 @@ class PiperTtsService implements TtsService {
         numThreads: TtsConfig.synthesisThreads,
       );
 
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Running generation on isolate...");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Running generation on isolate...");
 
       final response = await Isolate.run(() => _generateSpeech(request));
 
       if (!response.success) {
-        if (kDebugMode) {
-          debugPrint("TTS SPEAK: FAILED - ${response.error}");
-        }
+        if (kDebugMode) debugPrint("TTS SPEAK: FAILED - ${response.error}");
         throw TtsException(response.error ?? "Speech generation failed");
       }
 
@@ -256,27 +241,21 @@ class PiperTtsService implements TtsService {
         debugPrint("TTS SPEAK: Playing audio...");
       }
 
-      // Play the generated audio.
       await _audioPlayer.play(DeviceFileSource(outputPath));
 
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Audio playback started");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Audio playback started");
 
-      /// Cleanup the temp file after playback starts.
-      /// Note: We don't wait for playback to finish before cleaning up,
-      /// as audioplayers handles the file independently once started.
-      unawaited(_cleanupTempFile(outputPath));
+      // FIX (Bug 5): delete the temp file only after playback completes,
+      // not on a fixed 5-second timer that can fire mid-playback.
+      unawaited(
+        _audioPlayer.onPlayerComplete.first.then((_) => _cleanupTempFile(outputPath)),
+      );
     } catch (e) {
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: ERROR - $e");
-      }
-      // Silently ignore errors - the text is still shown in UI.
+      if (kDebugMode) debugPrint("TTS SPEAK: ERROR - $e");
+      // Silently ignore — text is still shown in the UI.
     } finally {
       _isSpeaking = false;
-      if (kDebugMode) {
-        debugPrint("TTS SPEAK: Done");
-      }
+      if (kDebugMode) debugPrint("TTS SPEAK: Done");
     }
   }
 
@@ -291,15 +270,12 @@ class PiperTtsService implements TtsService {
   @override
   Future<void> dispose() async {
     if (_disposed) return;
-
     _disposed = true;
     await stop();
     await _audioPlayer.dispose();
   }
 
   Future<void> _cleanupTempFile(String path) async {
-    // Wait a bit then cleanup.
-    await Future.delayed(const Duration(seconds: 5));
     try {
       final file = File(path);
       if (await file.exists()) {
@@ -315,10 +291,8 @@ class PiperTtsService implements TtsService {
     _SpeechGenerationRequest request,
   ) {
     try {
-      // Initialize sherpa_onnx bindings.
       sherpa_onnx.initBindings();
 
-      // Create TTS configuration.
       final vits = sherpa_onnx.OfflineTtsVitsModelConfig(
         model: request.modelPath,
         tokens: request.tokensPath,
@@ -337,24 +311,20 @@ class PiperTtsService implements TtsService {
         maxNumSenetences: TtsConfig.maxNumSentences,
       );
 
-      // Create TTS engine.
       final tts = sherpa_onnx.OfflineTts(config);
 
-      // Generate speech.
       final audio = tts.generate(
         text: request.text,
         sid: request.speakerId,
         speed: request.speed,
       );
 
-      // Write to WAV file.
       final success = sherpa_onnx.writeWave(
         filename: request.outputPath,
         samples: audio.samples,
         sampleRate: audio.sampleRate,
       );
 
-      // Free TTS resources.
       tts.free();
 
       if (!success) {

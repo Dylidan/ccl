@@ -171,7 +171,7 @@ class LlmOrchestrator {
               role: MsgRole.assistant,
               text: onlineReply,
               timestamp: DateTime.now(),
-              assistantOrigin: AssistantOrigin.localLlm,
+              assistantOrigin: AssistantOrigin.onlineLlm, // FIX (Bug 4): was incorrectly tagged as localLlm
             ),
           ];
           if (kDebugMode) debugPrint('OpenRouter reply succeeded.');
